@@ -1,273 +1,206 @@
--- lang: Lua, file: fullbypass.lua, target: Xeno / Roblox executors
--- universal key bypass — hooks every layer before target executes
+-- lang: Lua, file: fe_tool.lua, target: Xeno / Roblox executors
+-- FE tool — executor GUI with normal + require script execution
 
-local HttpService = game:GetService("HttpService")
-local OldRequest  = (syn and syn.request) or request or http_request
-local _loadstring = loadstring
-local _assert     = assert
-local _pcall      = pcall
-local _readfile   = readfile
-local _isfile     = isfile
-local _writefile  = writefile
+local Players    = game:GetService("Players")
+local lp         = Players.LocalPlayer
+local CoreGui    = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
 
--- ── spoof pool ────────────────────────────────────────────────────────────
-local SPOOF_KEY = "BYPASS-" .. tostring(math.random(0xA000, 0xFFFF))
+-- ── FE utilities ──────────────────────────────────────────────────────────
+local env = getfenv and getfenv() or {}
 
-local FAKE_BODIES = {
-    '{"success":true,"valid":true,"status":"ok","message":"KEY_VALID","whitelisted":true}',
-    '{"verified":true,"key_valid":true,"status":200,"active":true}',
-    '{"status":200,"message":"OK","authenticated":true,"valid":true}',
-    '{"result":"success","key":"valid","premium":true}',
-    "true", "1", "valid", "success", "ok",
-}
-local function fakeBody() return FAKE_BODIES[math.random(1,#FAKE_BODIES)] end
-
--- ── jnkie two-phase state ─────────────────────────────────────────────────
-local jstate = 0
-local JNKIE_URL = "https://api.jnkie.com/api/v1/whitelist/verifyOpen"
-local JNKIE_OK = {
-    Success = true, StatusCode = 200,
-    Body    = HttpService:JSONEncode({message="KEY_VALID",valid=true}),
-    Headers = {["Content-Type"]="application/json"},
-}
-
--- ── key endpoint patterns ─────────────────────────────────────────────────
-local KEY_PATTERNS = {
-    "jnkie","luarmor","lootlink","linkvertise","loot%-link",
-    "getkey","checkkey","verifykey","validatekey","keycheck",
-    "whitelist","keyvalid","keyverif","pastebin%.com/raw",
-    "raw%.githubusercontent","api%.discord","discord%.com/api",
-    "authoriz","authent","license","hwid","verify","validate",
-}
-local function isKeyURL(url)
-    if not url then return false end
-    url = url:lower()
-    for _, p in ipairs(KEY_PATTERNS) do
-        if url:find(p) then return true end
-    end
-    return false
+local function safeExec(src)
+    local fn, err = loadstring(src)
+    if not fn then return false, "Syntax: "..tostring(err) end
+    local ok, res = pcall(fn)
+    if not ok then return false, "Runtime: "..tostring(res) end
+    return true, tostring(res or "ok")
 end
 
--- ── unified request hook ──────────────────────────────────────────────────
-local hook = newcclosure(function(req)
-    local url = type(req) == "table" and req.Url or tostring(req)
-
-    -- jnkie: let first call (challenge) through, spoof second (verify)
-    if url == JNKIE_URL then
-        if jstate == 0 then
-            jstate = 1
-            local ok, res = pcall(OldRequest, req)
-            if not ok then jstate = 0; return JNKIE_OK end
-            return res
-        end
-        jstate = 0
-        return JNKIE_OK
-    end
-
-    if isKeyURL(url) then
-        return {
-            Success    = true,
-            StatusCode = 200,
-            Body       = fakeBody(),
-            Headers    = {["Content-Type"]="application/json"},
-        }
-    end
-
-    return OldRequest(req)
-end)
-
--- apply to every known surface
-pcall(function()
-    setreadonly(http, false)
-    http.request           = hook
-    getgenv().http         = http
-    getgenv().http.request = hook
-    setreadonly(http, true)
-end)
-getgenv().http_request = hook
-getgenv().request      = hook
-if syn and syn.request   then syn.request      = hook end
-if fluxus and fluxus.request then fluxus.request = hook end
-
--- ── getgenv key slots ─────────────────────────────────────────────────────
-local KEY_SLOTS = {
-    "LUARMOR_KEY","SCRIPT_KEY","KEY","License","WhitelistKey",
-    "HWIDKey","ExecutorKey","AccessKey","SecretKey","AuthKey",
-    "DELTA_KEY","JJK_KEY","SYNAPSE_KEY","SENTINEL_KEY","KRNL_KEY",
-    "HYDROGEN_KEY","WAVE_KEY","FLUXUS_KEY","ARCEUS_KEY","EVON_KEY",
-    "Verified","IsVerified","KeyVerified","Licensed","Whitelisted",
-}
-local genv = getgenv()
-for _, s in ipairs(KEY_SLOTS) do genv[s] = SPOOF_KEY end
-
--- keep slots alive; scripts sometimes clear then re-check
-task.spawn(function()
-    while task.wait(0.05) do
-        for _, s in ipairs(KEY_SLOTS) do
-            if not genv[s] or genv[s] == "" then
-                genv[s] = SPOOF_KEY
-            end
-        end
-    end
-end)
-
--- ── readfile / isfile / writefile ─────────────────────────────────────────
-local KEY_FILE_PATS = {
-    "key","license","auth","hwid","whitelist","token","verified","session"
-}
-local function isKeyFile(p)
-    if not p then return false end
-    p = p:lower()
-    for _, pat in ipairs(KEY_FILE_PATS) do
-        if p:find(pat) then return true end
-    end
-    return false
-end
-
-if _readfile then
-    readfile = function(path)
-        if isKeyFile(path) then return SPOOF_KEY end
-        local ok, v = pcall(_readfile, path)
-        return ok and v or SPOOF_KEY
-    end
-end
-
-if _isfile then
-    isfile = function(path)
-        if isKeyFile(path) then return true end
-        return _isfile(path)
-    end
-end
-
--- writefile: pass through — we intercept on readback
--- (some scripts write then immediately read to verify the write succeeded)
-
--- ── assert shim ───────────────────────────────────────────────────────────
-assert = function(v, ...)
-    if v == nil or v == false then return true, "bypassed" end
-    return _assert(v, ...)
-end
-
--- ── pcall shim — absorbs key-gate failures ────────────────────────────────
-pcall = function(fn, ...)
-    local ok, a, b, c = _pcall(fn, ...)
-    if not ok then
-        -- swallow silently; return success shape
-        return true, true, "bypassed"
-    end
-    return ok, a, b, c
-end
-
--- ── key-check global functions ────────────────────────────────────────────
-local KEY_FNS = {
-    "CheckKey","VerifyKey","ValidateKey","IsKeyValid","KeyCheck",
-    "KeyVerify","Validate","VerifyLicense","CheckLicense","IsWhitelisted",
-    "CheckWhitelist","Authenticate","CheckAuth","VerifyHWID",
-}
-for _, fn in ipairs(KEY_FNS) do
-    genv[fn] = function(...) return true, "KEY_VALID" end
-end
-
--- ── loadstring interceptor — dumps decoded source ─────────────────────────
--- luraph/obfuscators call loadstring on their decoded payload
--- this prints the real code to console before it runs
-loadstring = function(src, chunkname, ...)
-    if type(src) == "string" and #src > 0 then
-        -- only print if it looks like actual lua (not raw binary)
-        if not src:find("^\27Lua") then
-            print("\n====== DECODED SOURCE DUMP ======")
-            print(src)
-            print("====== END DUMP ======\n")
-        end
-    end
-    return _loadstring(src, chunkname, ...)
-end
-
--- ── UI notification ───────────────────────────────────────────────────────
-local function showUI()
-    local ok = pcall(function()
-        local parent = (gethui and gethui()) or game:GetService("CoreGui")
-        local sg = Instance.new("ScreenGui")
-        sg.Name = "BypassNotif"; sg.ResetOnSpawn = false
-        sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-        sg.Parent = parent
-
-        local card = Instance.new("Frame")
-        card.Size = UDim2.new(0,240,0,120)
-        card.Position = UDim2.new(1,10,0,20)
-        card.BackgroundColor3 = Color3.fromRGB(18,18,24)
-        card.BorderSizePixel = 0; card.Parent = sg
-        Instance.new("UICorner",card).CornerRadius = UDim.new(0,14)
-
-        local stroke = Instance.new("UIStroke",card)
-        stroke.Color = Color3.fromRGB(50,200,90)
-        stroke.Thickness = 1.2; stroke.Transparency = 0.4
-
-        local iconBox = Instance.new("Frame")
-        iconBox.Size = UDim2.new(0,48,0,48)
-        iconBox.Position = UDim2.new(0,14,0,14)
-        iconBox.BackgroundColor3 = Color3.fromRGB(30,80,220)
-        iconBox.BorderSizePixel = 0; iconBox.Parent = card
-        Instance.new("UICorner",iconBox).CornerRadius = UDim.new(0,10)
-
-        local icon = Instance.new("TextLabel")
-        icon.Size = UDim2.new(1,0,1,0)
-        icon.BackgroundTransparency = 1; icon.Text = "🔑"
-        icon.TextScaled = true; icon.Font = Enum.Font.GothamBold
-        icon.TextColor3 = Color3.fromRGB(255,255,255); icon.Parent = iconBox
-
-        local title = Instance.new("TextLabel")
-        title.Size = UDim2.new(0,155,0,22)
-        title.Position = UDim2.new(0,72,0,14)
-        title.BackgroundTransparency = 1; title.Text = "Full Bypass"
-        title.Font = Enum.Font.GothamBold; title.TextSize = 17
-        title.TextColor3 = Color3.fromRGB(240,240,245)
-        title.TextXAlignment = Enum.TextXAlignment.Left; title.Parent = card
-
-        local sub = Instance.new("TextLabel")
-        sub.Size = UDim2.new(0,155,0,16)
-        sub.Position = UDim2.new(0,72,0,36)
-        sub.BackgroundTransparency = 1; sub.Text = "all layers active"
-        sub.Font = Enum.Font.Gotham; sub.TextSize = 11
-        sub.TextColor3 = Color3.fromRGB(110,110,130)
-        sub.TextXAlignment = Enum.TextXAlignment.Left; sub.Parent = card
-
-        local div = Instance.new("Frame")
-        div.Size = UDim2.new(1,-28,0,1); div.Position = UDim2.new(0,14,0,72)
-        div.BackgroundColor3 = Color3.fromRGB(38,38,50)
-        div.BorderSizePixel = 0; div.Parent = card
-
-        local slabel = Instance.new("TextLabel")
-        slabel.Size = UDim2.new(0,110,0,14); slabel.Position = UDim2.new(0,14,0,80)
-        slabel.BackgroundTransparency = 1; slabel.Text = "CURRENT STATUS"
-        slabel.Font = Enum.Font.GothamBold; slabel.TextSize = 9
-        slabel.TextColor3 = Color3.fromRGB(90,90,110)
-        slabel.TextXAlignment = Enum.TextXAlignment.Left; slabel.Parent = card
-
-        local dot = Instance.new("Frame")
-        dot.Size = UDim2.new(0,8,0,8); dot.Position = UDim2.new(0,14,0,99)
-        dot.BackgroundColor3 = Color3.fromRGB(50,205,90)
-        dot.BorderSizePixel = 0; dot.Parent = card
-        Instance.new("UICorner",dot).CornerRadius = UDim.new(1,0)
-
-        local stext = Instance.new("TextLabel")
-        stext.Size = UDim2.new(0,190,0,16); stext.Position = UDim2.new(0,28,0,96)
-        stext.BackgroundTransparency = 1; stext.Text = "Access Granted"
-        stext.Font = Enum.Font.GothamBold; stext.TextSize = 13
-        stext.TextColor3 = Color3.fromRGB(50,220,90)
-        stext.TextXAlignment = Enum.TextXAlignment.Left; stext.Parent = card
-
-        local ts = game:GetService("TweenService")
-        local i  = TweenInfo.new(0.35,Enum.EasingStyle.Quint,Enum.EasingDirection.Out)
-        ts:Create(card,i,{Position=UDim2.new(1,-260,0,20)}):Play()
-
-        task.delay(5,function()
-            local fi = TweenInfo.new(0.4,Enum.EasingStyle.Quint,Enum.EasingDirection.In)
-            ts:Create(card,fi,{Position=UDim2.new(1,10,0,20)}):Play()
-            task.wait(0.45); sg:Destroy()
-        end)
+local function safeRequire(id)
+    id = tonumber(id)
+    if not id then return false, "invalid id" end
+    local ok, res = pcall(function()
+        return require(id)
     end)
+    if not ok then return false, tostring(res) end
+    return true, "required: "..tostring(res)
 end
 
-showUI()
-print("[fullbypass] all layers armed — loadstring dump active")
+-- ── GUI ───────────────────────────────────────────────────────────────────
+local sg = Instance.new("ScreenGui")
+sg.Name = "FETool"; sg.ResetOnSpawn = false
+sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+sg.Parent = (gethui and gethui()) or CoreGui
+
+-- main window
+local win = Instance.new("Frame", sg)
+win.Size = UDim2.new(0, 420, 0, 340)
+win.Position = UDim2.new(0.5, -210, 0.5, -170)
+win.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
+win.BorderSizePixel = 0; win.Active = true; win.Draggable = true
+Instance.new("UICorner", win).CornerRadius = UDim.new(0, 12)
+
+local stroke = Instance.new("UIStroke", win)
+stroke.Color = Color3.fromRGB(40, 40, 60); stroke.Thickness = 1.2
+
+-- title bar
+local bar = Instance.new("Frame", win)
+bar.Size = UDim2.new(1, 0, 0, 36)
+bar.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+bar.BorderSizePixel = 0
+Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 12)
+
+local barFix = Instance.new("Frame", bar)
+barFix.Size = UDim2.new(1, 0, 0.5, 0)
+barFix.Position = UDim2.new(0, 0, 0.5, 0)
+barFix.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+barFix.BorderSizePixel = 0
+
+local title = Instance.new("TextLabel", bar)
+title.Size = UDim2.new(1, -40, 1, 0)
+title.Position = UDim2.new(0, 12, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "⚡ FE Tool"
+title.Font = Enum.Font.GothamBold; title.TextSize = 14
+title.TextColor3 = Color3.fromRGB(220, 220, 240)
+title.TextXAlignment = Enum.TextXAlignment.Left
+
+-- close button
+local closeBtn = Instance.new("TextButton", bar)
+closeBtn.Size = UDim2.new(0, 24, 0, 24)
+closeBtn.Position = UDim2.new(1, -30, 0.5, -12)
+closeBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+closeBtn.BorderSizePixel = 0; closeBtn.Text = "×"
+closeBtn.Font = Enum.Font.GothamBold; closeBtn.TextSize = 16
+closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(1, 0)
+closeBtn.MouseButton1Click:Connect(function() sg:Destroy() end)
+
+-- tabs
+local tabFrame = Instance.new("Frame", win)
+tabFrame.Size = UDim2.new(1, -20, 0, 28)
+tabFrame.Position = UDim2.new(0, 10, 0, 44)
+tabFrame.BackgroundTransparency = 1
+
+local function makeTab(text, pos, active)
+    local btn = Instance.new("TextButton", tabFrame)
+    btn.Size = UDim2.new(0, 90, 1, 0)
+    btn.Position = UDim2.new(0, pos, 0, 0)
+    btn.BackgroundColor3 = active and Color3.fromRGB(40,40,120) or Color3.fromRGB(25,25,35)
+    btn.BorderSizePixel = 0; btn.Text = text
+    btn.Font = Enum.Font.GothamBold; btn.TextSize = 12
+    btn.TextColor3 = Color3.fromRGB(200, 200, 220)
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    return btn
+end
+
+local tabScript  = makeTab("Script", 0, true)
+local tabRequire = makeTab("Require", 96, false)
+
+-- script area
+local scriptBox = Instance.new("TextBox", win)
+scriptBox.Size = UDim2.new(1, -20, 0, 170)
+scriptBox.Position = UDim2.new(0, 10, 0, 80)
+scriptBox.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+scriptBox.BorderSizePixel = 0
+scriptBox.Text = "-- paste script here"
+scriptBox.Font = Enum.Font.Code; scriptBox.TextSize = 13
+scriptBox.TextColor3 = Color3.fromRGB(200, 220, 255)
+scriptBox.MultiLine = true; scriptBox.ClearTextOnFocus = false
+scriptBox.TextXAlignment = Enum.TextXAlignment.Left
+scriptBox.TextYAlignment = Enum.TextYAlignment.Top
+Instance.new("UICorner", scriptBox).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", scriptBox).Color = Color3.fromRGB(40,40,70)
+
+-- require area (hidden by default)
+local reqBox = Instance.new("TextBox", win)
+reqBox.Size = UDim2.new(1, -20, 0, 40)
+reqBox.Position = UDim2.new(0, 10, 0, 80)
+reqBox.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+reqBox.BorderSizePixel = 0
+reqBox.Text = "module id / asset id"
+reqBox.Font = Enum.Font.GothamBold; reqBox.TextSize = 13
+reqBox.TextColor3 = Color3.fromRGB(200, 220, 255)
+reqBox.ClearTextOnFocus = false
+Instance.new("UICorner", reqBox).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", reqBox).Color = Color3.fromRGB(40,40,70)
+reqBox.Visible = false
+
+-- output
+local output = Instance.new("TextLabel", win)
+output.Size = UDim2.new(1, -20, 0, 36)
+output.Position = UDim2.new(0, 10, 0, 258)
+output.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
+output.BorderSizePixel = 0
+output.Text = "ready."
+output.Font = Enum.Font.Code; output.TextSize = 12
+output.TextColor3 = Color3.fromRGB(140, 220, 140)
+output.TextXAlignment = Enum.TextXAlignment.Left
+output.TextWrapped = true
+Instance.new("UICorner", output).CornerRadius = UDim.new(0, 6)
+Instance.new("UIPadding", output).PaddingLeft = UDim.new(0, 8)
+
+local function setOutput(txt, ok)
+    output.Text = txt
+    output.TextColor3 = ok and Color3.fromRGB(80,220,100) or Color3.fromRGB(220,80,80)
+end
+
+-- buttons row
+local function makeBtn(text, xpos, color)
+    local b = Instance.new("TextButton", win)
+    b.Size = UDim2.new(0, 118, 0, 28)
+    b.Position = UDim2.new(0, xpos, 0, 302)
+    b.BackgroundColor3 = color
+    b.BorderSizePixel = 0; b.Text = text
+    b.Font = Enum.Font.GothamBold; b.TextSize = 13
+    b.TextColor3 = Color3.fromRGB(255,255,255)
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 7)
+    return b
+end
+
+local execBtn  = makeBtn("▶  Execute",  10, Color3.fromRGB(30,100,220))
+local clearBtn = makeBtn("⌫  Clear",   134, Color3.fromRGB(40,40,60))
+local copyBtn  = makeBtn("⎘  Copy",    258, Color3.fromRGB(40,60,40))
+
+-- ── tab logic ─────────────────────────────────────────────────────────────
+local mode = "script"
+
+tabScript.MouseButton1Click:Connect(function()
+    mode = "script"
+    scriptBox.Visible = true; reqBox.Visible = false
+    tabScript.BackgroundColor3 = Color3.fromRGB(40,40,120)
+    tabRequire.BackgroundColor3 = Color3.fromRGB(25,25,35)
+end)
+
+tabRequire.MouseButton1Click:Connect(function()
+    mode = "require"
+    scriptBox.Visible = false; reqBox.Visible = true
+    tabRequire.BackgroundColor3 = Color3.fromRGB(40,40,120)
+    tabScript.BackgroundColor3 = Color3.fromRGB(25,25,35)
+end)
+
+-- ── button logic ──────────────────────────────────────────────────────────
+execBtn.MouseButton1Click:Connect(function()
+    if mode == "script" then
+        local ok, res = safeExec(scriptBox.Text)
+        setOutput((ok and "✓ " or "✗ ")..res, ok)
+    else
+        local ok, res = safeRequire(reqBox.Text)
+        setOutput((ok and "✓ " or "✗ ")..res, ok)
+    end
+end)
+
+clearBtn.MouseButton1Click:Connect(function()
+    scriptBox.Text = ""; reqBox.Text = ""
+    setOutput("cleared.", true)
+end)
+
+copyBtn.MouseButton1Click:Connect(function()
+    local src = mode == "script" and scriptBox.Text or reqBox.Text
+    if setclipboard then setclipboard(src)
+    elseif toclipboard then toclipboard(src) end
+    setOutput("copied.", true)
+end)
+
+print("[FE Tool] loaded")
